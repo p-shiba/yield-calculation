@@ -29,6 +29,8 @@ yield.py
     - ファイルの順番と依存関係を明確化
 2024-09-24:
     - config.jsonに 'columns_to_convert' キーを追加
+2024-09-26:
+    - コマンドライン方式を削除して、ダイアログボックスでの入力のみに修正
 
 以前の変更:
     - 利回り計算ロジックの改善
@@ -36,23 +38,15 @@ yield.py
 """
 
 # 年間利回りを計算する
-# コードを実行するだけで、ダイアログボックスの表示機能はない
-# コマンドライン方式のコマンド　python yield.py --input div_processed.csv --output div_yield.csv
-# GUI方式のコマンド　python yield.py
-# 読み込みファイルと保存ファイルを選択式とコマンドライン方式の折衷案で修正
-# データの読み込みと保存先を選択できるように修正した
-# 保存先がデフォルトでdiv_yield.csvに設定した
-# データ保全のために、読み込むデータと保存するデータを選択できるように修正した
-# 税後利回りも計算するように修正
-# 利回りの数値は端数処理をしないように修正
+# GUIを使用してファイル選択と上書き確認を行う
+# スクリプトはダイアログボックスのみを使用し、コマンドライン入力は不要
 
 import pandas as pd
 import numpy as np
-import argparse
 import json
 import logging
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 from pathlib import Path
 import os
 
@@ -136,83 +130,108 @@ def select_file(save=False, default_name='div_yield.csv'):
     str: 選択されたファイルのパス
     """
     root = tk.Tk()
-    root.withdraw()
+    root.withdraw()  # メインウィンドウを非表示
     if save:
-        try:
-            initial_dir = os.path.dirname(os.path.abspath(__file__))
-        except NameError:
-            initial_dir = Path.home()
-        return filedialog.asksaveasfilename(
+        initial_dir = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else Path.home()
+        file_path = filedialog.asksaveasfilename(
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
             initialdir=initial_dir,
             initialfile=default_name
         )
     else:
-        return filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
+        file_path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
+    root.destroy()
+    return file_path
 
-def main(input_file, output_file):
+def confirm_overwrite(output_file):
+    """
+    出力ファイルが既に存在する場合に上書きするか確認するダイアログを表示する。
+
+    Parameters:
+    output_file (str): 出力ファイルのパス
+
+    Returns:
+    bool: 上書きする場合はTrue、しない場合はFalse
+    """
+    root = tk.Tk()
+    root.withdraw()  # メインウィンドウを非表示
+    result = messagebox.askyesno("確認", f"出力ファイル '{output_file}' は既に存在します。上書きしますか？")
+    root.destroy()
+    return result
+
+def main():
     config = load_config()
     
+    # 入力ファイルの選択
+    input_file = select_file(save=False)
+    if not input_file:
+        logging.error("入力ファイルが選択されませんでした。")
+        return
+    
+    # 出力ファイルの選択
+    output_file = select_file(save=True, default_name='div_yield.csv')
+    if not output_file:
+        logging.error("出力ファイルが選択されませんでした。")
+        return
+    
+    # 出力ファイルが既に存在する場合の確認
+    if os.path.exists(output_file):
+        overwrite = confirm_overwrite(output_file)
+        if not overwrite:
+            logging.info("処理を中断しました。")
+            return
+    
+    # データの読み込み
     try:
         df = pd.read_csv(input_file, encoding='utf-8-sig')
     except FileNotFoundError:
-        logging.error(f"入力ファイル {input_file} が見つかりません。")
+        logging.error(f"入力ファイル '{input_file}' が見つかりません。")
         return
     except pd.errors.EmptyDataError:
-        logging.error(f"入力ファイル {input_file} が空です。")
+        logging.error(f"入力ファイル '{input_file}' が空です。")
         return
     except pd.errors.ParserError as e:
-        logging.error(f"入力ファイル {input_file} の解析中にエラーが発生しました: {e}")
+        logging.error(f"入力ファイル '{input_file}' の解析中にエラーが発生しました: {e}")
         return
-
+    
     logging.info("元のデータ型:")
     logging.info(df.dtypes)
     logging.info("\n最初の数行:")
     logging.info(df.head())
-
+    
     # 必要な列が存在するか確認
     missing_columns = [col for col in config['columns_to_convert'] if col not in df.columns]
     if missing_columns:
         logging.error(f"指定された列 {missing_columns} が入力ファイルに存在しません。")
         return
-
+    
+    # 列のデータクレンジング
     for column in config['columns_to_convert']:
         df[column] = df[column].replace(config['currency_symbols'], regex=True)
         df[column] = pd.to_numeric(df[column], errors='coerce')
-
+    
     logging.info("\n変換後のデータ型:")
     logging.info(df.dtypes)
     logging.info("\n変換後の最初の数行:")
     logging.info(df.head())
-
+    
+    # 利回り計算
     df['＄:利回り'] = calculate_annual_yield(df)
     df['＄:税後利回り'] = df['＄:利回り'] * config['tax_rate']
-
-    # 出力ファイルが既に存在する場合の確認
-    if os.path.exists(output_file):
-        response = input(f"出力ファイル {output_file} は既に存在します。上書きしますか？ (y/n): ")
-        if response.lower() != 'y':
-            logging.info("処理を中断しました。")
-            return
-
-    df.to_csv(output_file, index=False, encoding='utf-8-sig')
-    logging.info(f"\n利回り計算が完了し、結果を{output_file}に保存しました。")
-
+    
+    # データの保存
+    try:
+        df.to_csv(output_file, index=False, encoding='utf-8-sig')
+        logging.info(f"\n利回り計算が完了し、結果を '{output_file}' に保存しました。")
+    except Exception as e:
+        logging.error(f"出力ファイル '{output_file}' の保存中にエラーが発生しました: {e}")
+        return
+    
+    # 最終結果のログ出力
     logging.info("\n最終的な利回り計算結果:")
     pd.set_option('display.float_format', '{:.6f}'.format)
     logging.info(df[['番号', '配当/株', '前月終値', '＄:利回り', '＄:税後利回り']])
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='年間利回りと税後利回りを計算します。')
-    parser.add_argument('--input', type=str, help='入力CSVファイルのパス')
-    parser.add_argument('--output', type=str, help='出力CSVファイルのパス')
-    args = parser.parse_args()
-
-    input_file = args.input if args.input else select_file()
-    output_file = args.output if args.output else select_file(save=True, default_name='div_yield.csv')
-
-    if input_file and output_file:
-        main(input_file, output_file)
-    else:
-        logging.error("入力ファイルまたは出力ファイルが選択されませんでした。")
+    main()
